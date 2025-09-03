@@ -16,7 +16,6 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-#include <endian.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -62,7 +61,7 @@ int parse_port(char *port_str) {
 
 int get_seconds(time_t *s) {
   struct timespec ts;
-  int ret = clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+  int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
   if (ret != 0) return -1;
   *s = ts.tv_sec;
   return 0;
@@ -70,7 +69,7 @@ int get_seconds(time_t *s) {
 
 int get_ms(uint64_t *ms) {
   struct timespec ts;
-  int ret = clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+  int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
   if (ret != 0) return -1;
   *ms = ((uint64_t)(ts.tv_sec)) * 1000 + ((uint64_t)(ts.tv_nsec)) / 1000 / 1000;
 
@@ -80,7 +79,7 @@ int get_ms(uint64_t *ms) {
 int32_t get_srt_sn(void *pkt, int n) {
   if (n < 4) return -1;
 
-  uint32_t sn = be32toh(*((uint32_t *)pkt));
+  uint32_t sn = ntohl(*((uint32_t *)pkt));
   if ((sn & (1 << 31)) == 0) {
     return (int32_t)sn;
   }
@@ -90,7 +89,7 @@ int32_t get_srt_sn(void *pkt, int n) {
 
 uint16_t get_srt_type(void *pkt, int n) {
   if (n < 2) return 0;
-  return be16toh(*((uint16_t *)pkt));
+  return ntohs(*((uint16_t *)pkt));
 }
 
 int is_srt_ack(void *pkt, int n) {

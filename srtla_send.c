@@ -28,8 +28,10 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 
 #include "common.h"
+#include "getline.h"
 
 #define PKT_LOG_SZ 256
 #define CONN_TIMEOUT 4
@@ -58,7 +60,7 @@ typedef struct conn {
   int fd;
   time_t last_rcvd;
   time_t last_sent;
-  struct sockaddr src;
+  struct sockaddr_in src;
   int removed;
   int in_flight_pkts;
   int window;
@@ -72,8 +74,7 @@ int do_update_conns = 0;
 
 struct addrinfo *addrs;
 
-struct sockaddr srtla_addr, srt_addr;
-const socklen_t addr_len = sizeof(srtla_addr);
+struct sockaddr_in srtla_addr, srt_addr;
 conn_t *conns = NULL;
 int listenfd;
 int active_connections = 0;
@@ -132,11 +133,11 @@ int send_reg1(conn_t *c) {
   if (c->fd < 0) return -1;
 
   char buf[MTU];
-  uint16_t packet_type = htobe16(SRTLA_TYPE_REG1);
+  uint16_t packet_type = htons(SRTLA_TYPE_REG1);
   memcpy(buf, &packet_type, sizeof(packet_type));
   memcpy(buf + sizeof(packet_type), srtla_id, SRTLA_ID_LEN);
 
-  int ret = sendto(c->fd, buf, SRTLA_TYPE_REG1_LEN, 0, &srtla_addr, addr_len);
+  int ret = sendto(c->fd, buf, SRTLA_TYPE_REG1_LEN, 0, (struct sockaddr *)&srtla_addr, sizeof(srtla_addr));
   if (ret != SRTLA_TYPE_REG1_LEN) return -1;
 
   return 0;
@@ -146,11 +147,11 @@ int send_reg2(conn_t *c) {
   if (c->fd < 0) return -1;
 
   char buf[SRTLA_TYPE_REG2_LEN];
-  uint16_t packet_type = htobe16(SRTLA_TYPE_REG2);
+  uint16_t packet_type = htons(SRTLA_TYPE_REG2);
   memcpy(buf, &packet_type, sizeof(packet_type));
   memcpy(buf + sizeof(packet_type), srtla_id, SRTLA_ID_LEN);
 
-  int ret = sendto(c->fd, buf, SRTLA_TYPE_REG2_LEN, 0, &srtla_addr, addr_len);
+  int ret = sendto(c->fd, buf, SRTLA_TYPE_REG2_LEN, 0, (struct sockaddr *)&srtla_addr, sizeof(srtla_addr));
   return (ret == SRTLA_TYPE_REG2_LEN) ? 0 : -1;
 }
 
@@ -162,7 +163,7 @@ Handling code for packets coming from the SRT caller
 */
 void reg_pkt(conn_t *c, int32_t packet) {
   debug("%s (%p): register packet %d at idx %d\n",
-        print_addr(&c->src), c, packet, c->pkt_idx);
+        print_addr((struct sockaddr *)&c->src), c, packet, c->pkt_idx);
   c->pkt_log[c->pkt_idx] = packet;
   c->pkt_idx++;
   c->pkt_idx %= PKT_LOG_SZ;
@@ -200,7 +201,7 @@ conn_t *select_conn() {
     }*/
 
     if (conn_timed_out(c, t)) {
-      debug("%s (%p): is timed out, ignoring it\n", print_addr(&c->src), c);
+      debug("%s (%p): is timed out, ignoring it\n", print_addr((struct sockaddr *)&c->src), c);
       continue;
     }
 
@@ -221,12 +222,12 @@ conn_t *select_conn() {
 void handle_srt_data(int fd) {
   char buf[MTU];
   socklen_t len = sizeof(srt_addr);
-  int n = recvfrom(fd, &buf, MTU, 0, &srt_addr, &len);
+  int n = recvfrom(fd, &buf, MTU, 0, (struct sockaddr *)&srt_addr, &len);
 
   conn_t *c = select_conn();
   if (c) {
     int32_t sn = get_srt_sn(buf, n);
-    int ret = sendto(c->fd, &buf, n, 0, &srtla_addr, addr_len);
+    int ret = sendto(c->fd, &buf, n, 0, (struct sockaddr *)&srtla_addr, sizeof(srtla_addr));
     if (ret == n) {
       if (sn >= 0) {
         reg_pkt(c, sn);
@@ -236,7 +237,7 @@ void handle_srt_data(int fd) {
          reconnection is confirmed. 1 so connection_housekeeping() prints its message */
       c->last_rcvd = 1;
       err("%s (%p): sendto() failed, disabling the connection\n",
-          print_addr(&c->src), c);
+          print_addr((struct sockaddr *)&c->src), c);
     }
   }
 }
@@ -266,7 +267,7 @@ void register_nak(int32_t packet) {
         c->window -= WINDOW_DECR;
         c->window = max(c->window, WINDOW_MIN*WINDOW_MULT);
         debug("%s (%p): found NAKed packet %d in the log\n",
-              print_addr(&c->src), c, packet);
+              print_addr((struct sockaddr *)&c->src), c, packet);
         return;
       }
     }
@@ -360,11 +361,11 @@ void handle_srtla_data(conn_t *c) {
       char *id = &buf[2];
       if (memcmp(id, srtla_id, SRTLA_ID_LEN/2) != 0) {
         err("%s (%p): got a mismatching ID in SRTLA_REG2\n",
-           print_addr(&c->src), c);
+           print_addr((struct sockaddr *)&c->src), c);
         return;
       }
 
-      info("%s (%p): connection group registered\n", print_addr(&c->src), c);
+      info("%s (%p): connection group registered\n", print_addr((struct sockaddr *)&c->src), c);
       memcpy(srtla_id, id, SRTLA_ID_LEN);
 
       /* Broadcast REG2 */
@@ -383,7 +384,7 @@ void handle_srtla_data(conn_t *c) {
   switch(packet_type) {
     case SRT_TYPE_ACK: {
       uint32_t last_ack = *((uint32_t *)&buf[16]);
-      last_ack = be32toh(last_ack);
+      last_ack = ntohl(last_ack);
       register_srt_ack(last_ack);
       break;
     }
@@ -391,10 +392,10 @@ void handle_srtla_data(conn_t *c) {
     case SRT_TYPE_NAK: {
       uint32_t *ids = (uint32_t *)buf;
       for (int i = 4; i < n/4; i++) {
-        uint32_t id = be32toh(ids[i]);
+        uint32_t id = ntohl(ids[i]);
         if (id & (1 << 31)) {
           id = id & 0x7FFFFFFF;
-          uint32_t last_id = be32toh(ids[i+1]);
+          uint32_t last_id = ntohl(ids[i+1]);
           for (int32_t lost = id; lost <= last_id; lost++) {
             register_nak(lost);
           }
@@ -410,24 +411,24 @@ void handle_srtla_data(conn_t *c) {
     case SRTLA_TYPE_ACK: {
       uint32_t *acks = (uint32_t *)buf;
       for (int i = 1; i < n/4; i++) {
-        uint32_t id = be32toh(acks[i]);
-        debug("%s (%p): ack %d\n", print_addr(&c->src), c, id);
+        uint32_t id = ntohl(acks[i]);
+        debug("%s (%p): ack %d\n", print_addr((struct sockaddr *)&c->src), c, id);
         register_srtla_ack(id);
       }
       return;
     }
     case SRTLA_TYPE_KEEPALIVE:
-      debug("%s (%p): got a keepalive\n", print_addr(&c->src), c);
+      debug("%s (%p): got a keepalive\n", print_addr((struct sockaddr *)&c->src), c);
       return; // don't send to SRT
 
     case SRTLA_TYPE_REG3:
       has_connected = 1;
       active_connections++;
-      info("%s (%p): connection established\n", print_addr(&c->src), c);
+      info("%s (%p): connection established\n", print_addr((struct sockaddr *)&c->src), c);
       return;
   } // switch
 
-  sendto(listenfd, &buf, n, 0, &srt_addr, addr_len);
+  sendto(listenfd, &buf, n, 0, (struct sockaddr *)&srt_addr, sizeof(srt_addr));
 }
 
 
@@ -436,7 +437,7 @@ void handle_srtla_data(conn_t *c) {
 Connection and socket management
 
 */
-conn_t *conn_find_by_src(struct sockaddr *src) {
+conn_t *conn_find_by_src(struct sockaddr_in *src) {
   for (conn_t *c = conns; c != NULL; c = c->next) {
     if (memcmp(src, &c->src, sizeof(*src)) == 0) {
       return c;
@@ -462,9 +463,9 @@ int setup_conns(char *source_ip_file) {
       *nl = '\0';
     }
 
-    struct sockaddr src;
+    struct sockaddr_in src;
 
-    int ret = parse_ip((struct sockaddr_in *)&src, line);
+    int ret = parse_ip(&src, line);
     if (ret == 0) {
       conn_t *c = conn_find_by_src(&src);
       if (c == NULL) {
@@ -480,7 +481,7 @@ int setup_conns(char *source_ip_file) {
 
         count++;
 
-        printf("Added connection via %s (%p)\n", print_addr(&c->src), c);
+        printf("Added connection via %s (%p)\n", print_addr((struct sockaddr *)&c->src), c);
       } else {
         c->removed = 0;
       }
@@ -505,7 +506,7 @@ void update_conns(char *source_ip_file) {
   for (conn_t *c = conns; c != NULL; c = next) {
     next = c->next;
     if (c->removed) {
-      printf("Removed connection via %s (%p)\n", print_addr(&c->src), c);
+      printf("Removed connection via %s (%p)\n", print_addr((struct sockaddr *)&c->src), c);
 
       if (c == pending_reg2_conn) {
         pending_reg2_conn = NULL;
@@ -533,10 +534,21 @@ int open_socket(conn_t *c, int quiet) {
   }
 
   // Set up the socket
-  int fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+  int fd = socket(AF_INET, SOCK_DGRAM, 0);
   if (fd < 0) {
     err("Failed to open a socket");
     return -1;
+  }
+
+  // Set non-blocking
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags == -1) {
+    err("Failed to get socket flags");
+    goto err;
+  }
+  if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+    err("Failed to set non-blocking socket");
+    goto err;
   }
 
   int bufsize = SEND_BUF_SIZE;
@@ -547,10 +559,10 @@ int open_socket(conn_t *c, int quiet) {
   }
 
   // Bind it to the source address
-  ret = bind(fd, &c->src, sizeof(c->src));
+  ret = bind(fd, (struct sockaddr *)&c->src, sizeof(c->src));
   if (ret != 0) {
     if (!quiet) {
-      err("Failed to bind to the source address %s\n", print_addr(&c->src));
+      err("Failed to bind to the source address %s\n", print_addr((struct sockaddr *)&c->src));
     }
     goto err;
   }
@@ -583,14 +595,14 @@ Connection housekeeping
 */
 void set_srtla_addr(struct addrinfo *addr) {
   memcpy(&srtla_addr, addr->ai_addr, addr->ai_addrlen);
-  info("Trying to connect to %s...\n", print_addr(&srtla_addr));
+  info("Trying to connect to %s...\n", print_addr((struct sockaddr *)&srtla_addr));
 }
 
 void send_keepalive(conn_t *c) {
-  debug("%s (%p): sending keepalive\n", print_addr(&c->src), c);
-  uint16_t pkt = htobe16(SRTLA_TYPE_KEEPALIVE);
+  debug("%s (%p): sending keepalive\n", print_addr((struct sockaddr *)&c->src), c);
+  uint16_t pkt = htons(SRTLA_TYPE_KEEPALIVE);
   // ignoring the result on purpose
-  sendto(c->fd, &pkt, sizeof(pkt), 0, &srtla_addr, addr_len);
+  sendto(c->fd, &pkt, sizeof(pkt), 0, (struct sockaddr *)&srtla_addr, sizeof(srtla_addr));
 }
 
 #define HOUSEKEEPING_INT 1000 // ms
@@ -623,7 +635,7 @@ void connection_housekeeping() {
          we reset its status and print a message */
       if (c->last_rcvd > 0) {
         info("%s (%p): connection failed, attempting to reconnect\n",
-             print_addr(&c->src), c);
+             print_addr((struct sockaddr *)&c->src), c);
         c->last_rcvd = 0;
         c->last_sent = 0;
         c->window = WINDOW_MIN * WINDOW_MULT;
@@ -665,12 +677,12 @@ void connection_housekeeping() {
     if (ms > (all_failed_at + (GLOBAL_TIMEOUT * 1000))) {
       if (has_connected) {
         err("Failed to re-establish any connections to %s\n",
-            print_addr(&srtla_addr));
+            print_addr((struct sockaddr *)&srtla_addr));
         exit(EXIT_FAILURE);
       }
 
       err("Failed to establish any initial connections to %s\n",
-          print_addr(&srtla_addr));
+          print_addr((struct sockaddr *)&srtla_addr));
 
       // Walk through the list of resolved addresses
       if (addrs->ai_next) {
@@ -768,7 +780,7 @@ int main(int argc, char **argv) {
 
     fd_set read_fds = active_fds;
     struct timeval to = {.tv_sec = 0, .tv_usec = 200*1000};
-    ret = select(FD_SETSIZE, &read_fds, NULL, NULL, &to);
+    ret = select(max_act_fd + 1, &read_fds, NULL, NULL, &to);
 
     if (ret > 0) {
       if (FD_ISSET(listenfd, &read_fds)) {
@@ -786,7 +798,7 @@ int main(int argc, char **argv) {
     if (info_int == 0) {
       for (conn_t *c = conns; c != NULL; c = c->next) {
         debug("%s (%p): in flight: %d, window: %d, last_rcvd %ld\n",
-              print_addr(&c->src), c, c->in_flight_pkts, c->window, c->last_rcvd);
+              print_addr((struct sockaddr *)&c->src), c, c->in_flight_pkts, c->window, c->last_rcvd);
       }
       info_int = LOG_PKT_INT;
     }
